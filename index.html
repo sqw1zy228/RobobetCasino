@@ -1,0 +1,514 @@
+import { useState, useEffect } from "react";
+import { base44 } from "@/api/base44Client";
+
+const ADMIN_PASSWORD = "robobet2024admin";
+
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { toast } from "sonner";
+import { Users, MessageCircle, Shield, Send, Wallet, Bell, CheckCircle, XCircle, Eye, Ban, UserCheck, ArrowDownCircle, ArrowUpCircle, Trash2 } from "lucide-react";
+import moment from "moment";
+
+export default function AdminPage() {
+  const [authed, setAuthed] = useState(false);
+  const [pwInput, setPwInput] = useState("");
+  const [pwError, setPwError] = useState(false);
+  const [players, setPlayers] = useState([]);
+  const [tickets, setTickets] = useState([]);
+  const [transactions, setTransactions] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [replyTexts, setReplyTexts] = useState({});
+  const [balanceAmounts, setBalanceAmounts] = useState({});
+  const [bonuses, setBonuses] = useState({});
+  const [notifForm, setNotifForm] = useState({ title: "", message: "", target_player_id: "" });
+  const [sendingNotif, setSendingNotif] = useState(false);
+  const [selectedPlayer, setSelectedPlayer] = useState(null);
+  const [playerGameHistory, setPlayerGameHistory] = useState([]);
+  const [playerTransactions, setPlayerTransactions] = useState([]);
+  const [loadingPlayerDetail, setLoadingPlayerDetail] = useState(false);
+
+  // Ban/delete modal state
+  const [actionModal, setActionModal] = useState(null); // { type: "ban"|"delete", player }
+  const [actionReason, setActionReason] = useState("");
+
+  useEffect(() => {
+    const stored = sessionStorage.getItem("admin_auth");
+    if (stored === "yes") setAuthed(true);
+  }, []);
+
+  useEffect(() => { if (authed) loadAll(); }, [authed]);
+
+  const handleLogin = () => {
+    if (pwInput === ADMIN_PASSWORD) {
+      sessionStorage.setItem("admin_auth", "yes");
+      setAuthed(true);
+    } else {
+      setPwError(true);
+    }
+  };
+
+  if (!authed) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="glass rounded-2xl p-8 w-full max-w-sm mx-4 space-y-4">
+          <h1 className="font-heading text-2xl font-bold text-center neon-glow text-primary">ADMIN</h1>
+          <Input
+            type="password"
+            placeholder="Пароль адміністратора"
+            value={pwInput}
+            onChange={(e) => { setPwInput(e.target.value); setPwError(false); }}
+            onKeyDown={(e) => { if (e.key === "Enter") handleLogin(); }}
+            className={`bg-secondary/50 border-border ${pwError ? "border-destructive" : ""}`}
+          />
+          {pwError && <p className="text-destructive text-sm text-center">Невірний пароль</p>}
+          <button
+            onClick={handleLogin}
+            className="w-full h-11 rounded-lg bg-primary text-primary-foreground font-heading tracking-wider hover:bg-primary/90 transition-colors"
+          >
+            УВІЙТИ
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const loadAll = async () => {
+    const [p, t, txs] = await Promise.all([
+      base44.entities.Player.list("-created_date"),
+      base44.entities.SupportTicket.list("-created_date"),
+      base44.entities.Transaction.list("-created_date", 200),
+    ]);
+    setPlayers(p);
+    setTickets(t);
+    setTransactions(txs);
+    setLoading(false);
+  };
+
+  const handleReply = async (ticket) => {
+    const reply = replyTexts[ticket.id];
+    if (!reply?.trim()) return;
+    await base44.entities.SupportTicket.update(ticket.id, { admin_reply: reply, status: "answered" });
+    setReplyTexts(prev => ({ ...prev, [ticket.id]: "" }));
+    toast.success("Відповідь відправлена");
+    loadAll();
+  };
+
+  const adjustBalance = async (p, amount) => {
+    const a = parseInt(amount);
+    if (!a || isNaN(a)) return;
+    const newBalance = Math.max(0, (p.balance || 0) + a);
+    await base44.entities.Player.update(p.id, { balance: newBalance });
+    setBalanceAmounts(prev => ({ ...prev, [p.id]: "" }));
+    toast.success(`Баланс оновлено: €${newBalance}`);
+    loadAll();
+  };
+
+  const giveFreeSpins = async (p) => {
+    const amount = parseInt(bonuses[p.id + "_fs"]) || 0;
+    if (!amount || amount <= 0) return;
+    await base44.entities.Player.update(p.id, { free_spins: (p.free_spins || 0) + amount });
+    setBonuses(prev => ({ ...prev, [p.id + "_fs"]: "" }));
+    toast.success(`Видано ${amount} фріспінів`);
+    loadAll();
+  };
+
+  const sendNotification = async () => {
+    if (!notifForm.title.trim() || !notifForm.message.trim()) return;
+    setSendingNotif(true);
+    await base44.entities.Notification.create({
+      title: notifForm.title,
+      message: notifForm.message,
+      target_player_id: notifForm.target_player_id || "",
+      read_by: [],
+    });
+    setNotifForm({ title: "", message: "", target_player_id: "" });
+    toast.success("Сповіщення відправлено");
+    setSendingNotif(false);
+  };
+
+  // Transactions
+  const approveTransaction = async (tx) => {
+    await base44.entities.Transaction.update(tx.id, { status: "approved" });
+    if (tx.type === "deposit") {
+      const p = players.find(pl => pl.id === tx.player_id);
+      if (p) await base44.entities.Player.update(p.id, { balance: (p.balance || 0) + tx.amount });
+    }
+    toast.success(`Заявку підтверджено${tx.type === "deposit" ? ` (+€${tx.amount})` : ""}`);
+    loadAll();
+  };
+
+  const rejectTransaction = async (tx) => {
+    await base44.entities.Transaction.update(tx.id, { status: "rejected" });
+    if (tx.type === "withdrawal") {
+      const p = players.find(pl => pl.id === tx.player_id);
+      if (p) await base44.entities.Player.update(p.id, { balance: (p.balance || 0) + tx.amount });
+      toast.success("Заявку відхилено, кошти повернено гравцю");
+    } else {
+      toast.success("Заявку відхилено");
+    }
+    loadAll();
+  };
+
+  // Ban with reason
+  const openBanModal = (p) => {
+    setActionModal({ type: "ban", player: p });
+    setActionReason("");
+  };
+
+  const confirmBan = async () => {
+    const p = actionModal.player;
+    const newBanned = !p.is_banned;
+    await base44.entities.Player.update(p.id, { is_banned: newBanned });
+    if (newBanned) {
+      const msg = actionReason.trim()
+        ? `Ваш акаунт заблоковано. Причина: ${actionReason.trim()}`
+        : "Ваш акаунт заблоковано адміністратором. Зверніться до підтримки.";
+      await base44.entities.Notification.create({
+        title: "Акаунт заблоковано",
+        message: msg,
+        target_player_id: p.id,
+        read_by: [],
+      });
+    }
+    toast.success(newBanned ? `${p.nickname} заблоковано` : `${p.nickname} розблоковано`);
+    setActionModal(null);
+    setActionReason("");
+    if (selectedPlayer?.id === p.id) setSelectedPlayer(prev => ({ ...prev, is_banned: newBanned }));
+    loadAll();
+  };
+
+  // Delete player with reason
+  const openDeleteModal = (p) => {
+    setActionModal({ type: "delete", player: p });
+    setActionReason("");
+  };
+
+  const confirmDelete = async () => {
+    const p = actionModal.player;
+    const reason = actionReason.trim();
+    // Mark as deleted (is_deleted flag + delete_reason) instead of actually deleting
+    await base44.entities.Player.update(p.id, {
+      is_deleted: true,
+      delete_reason: reason || "",
+      is_banned: true,
+    });
+    toast.success(`Профіль ${p.nickname} видалено`);
+    setActionModal(null);
+    setActionReason("");
+    setSelectedPlayer(null);
+    loadAll();
+  };
+
+  // View player profile
+  const viewPlayer = async (p) => {
+    setSelectedPlayer(p);
+    setLoadingPlayerDetail(true);
+    const [gh, txs] = await Promise.all([
+      base44.entities.GameHistory.filter({ player_id: p.id }, "-created_date", 30),
+      base44.entities.Transaction.filter({ player_id: p.id }, "-created_date", 30),
+    ]);
+    setPlayerGameHistory(gh);
+    setPlayerTransactions(txs);
+    setLoadingPlayerDetail(false);
+  };
+
+  if (loading) return (
+    <div className="flex justify-center py-20">
+      <div className="w-8 h-8 border-4 border-primary/30 border-t-primary rounded-full animate-spin" />
+    </div>
+  );
+
+  // Action modal (ban/delete)
+  const ActionModal = () => {
+    if (!actionModal) return null;
+    const isBan = actionModal.type === "ban";
+    const p = actionModal.player;
+    const isUnban = isBan && p.is_banned;
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setActionModal(null)}>
+        <div className="glass rounded-2xl p-6 w-full max-w-sm space-y-4" onClick={e => e.stopPropagation()}>
+          <h3 className="font-heading text-base font-bold text-center">
+            {isBan ? (isUnban ? `Розблокувати ${p.nickname}?` : `Заблокувати ${p.nickname}?`) : `Видалити профіль ${p.nickname}?`}
+          </h3>
+          {!(isBan && isUnban) && (
+            <div>
+              <p className="text-xs text-muted-foreground mb-2">Причина (необов'язково):</p>
+              <Textarea
+                placeholder={isBan ? "Причина блокування..." : "Причина видалення..."}
+                value={actionReason}
+                onChange={e => setActionReason(e.target.value)}
+                rows={3}
+                className="bg-secondary/50 text-sm"
+              />
+            </div>
+          )}
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={() => setActionModal(null)} className="flex-1 h-10">Скасувати</Button>
+            <Button
+              onClick={isBan ? confirmBan : confirmDelete}
+              className={`flex-1 h-10 font-heading text-sm ${isBan && isUnban ? "bg-green-600 hover:bg-green-700" : "bg-destructive hover:bg-destructive/90"}`}
+            >
+              {isBan ? (isUnban ? "Розблокувати" : "Заблокувати") : "Видалити"}
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // Player detail view
+  if (selectedPlayer) {
+    const p = selectedPlayer;
+    return (
+      <div className="min-h-screen bg-background p-4 max-w-2xl mx-auto">
+        <ActionModal />
+        <div className="flex items-center gap-2 mb-4">
+          <button onClick={() => setSelectedPlayer(null)} className="text-muted-foreground hover:text-foreground text-sm">← Назад</button>
+          <Shield className="w-5 h-5 text-primary" />
+          <h1 className="font-heading text-lg font-bold neon-glow text-primary">Профіль гравця</h1>
+        </div>
+
+        <div className="glass rounded-2xl p-4 space-y-3 mb-4">
+          <div className="flex items-start gap-3">
+            <div className="w-14 h-14 rounded-full bg-secondary border-2 border-primary overflow-hidden flex items-center justify-center shrink-0">
+              {p.avatar_url ? <img src={p.avatar_url} alt="" className="w-full h-full object-cover" /> : <span className="font-heading text-xl text-primary">{p.nickname?.[0]?.toUpperCase()}</span>}
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <p className="font-heading font-bold text-lg">{p.nickname}</p>
+                {p.is_banned && !p.is_deleted && <span className="px-2 py-0.5 bg-destructive/20 border border-destructive/40 rounded-full text-destructive text-xs">Заблоковано</span>}
+                {p.is_deleted && <span className="px-2 py-0.5 bg-red-900/40 border border-red-700/50 rounded-full text-red-400 text-xs">Видалено</span>}
+              </div>
+              <p className="text-xs text-muted-foreground">ID: {p.id}</p>
+              {p.roblox_username && <p className="text-xs text-accent">Roblox: @{p.roblox_username} ({p.roblox_id})</p>}
+            </div>
+          </div>
+
+          <div className="flex gap-2 flex-wrap">
+            {!p.is_deleted && (
+              <Button onClick={() => openBanModal(p)} size="sm" className={`text-xs h-8 ${p.is_banned ? "bg-green-600 hover:bg-green-700" : "bg-destructive hover:bg-destructive/90"}`}>
+                {p.is_banned ? <><UserCheck className="w-3 h-3 mr-1" />Розблокувати</> : <><Ban className="w-3 h-3 mr-1" />Заблокувати</>}
+              </Button>
+            )}
+            {!p.is_deleted && (
+              <Button onClick={() => openDeleteModal(p)} size="sm" variant="outline" className="text-xs h-8 border-red-500/50 text-red-400 hover:bg-red-500/10">
+                <Trash2 className="w-3 h-3 mr-1" />Видалити профіль
+              </Button>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 text-sm">
+            <div className="bg-secondary/30 rounded-lg p-2"><p className="text-xs text-muted-foreground">Баланс</p><p className="font-heading text-accent">€{(p.balance || 0).toLocaleString()}</p></div>
+            <div className="bg-secondary/30 rounded-lg p-2"><p className="text-xs text-muted-foreground">Виграно</p><p className="font-heading text-green-400">€{(p.total_won || 0).toLocaleString()}</p></div>
+            <div className="bg-secondary/30 rounded-lg p-2"><p className="text-xs text-muted-foreground">Програно</p><p className="font-heading text-red-400">€{(p.total_lost || 0).toLocaleString()}</p></div>
+            <div className="bg-secondary/30 rounded-lg p-2"><p className="text-xs text-muted-foreground">Ігор</p><p className="font-heading text-primary">{p.total_games || 0}</p></div>
+          </div>
+
+          {p.roblox_avatar && (
+            <div className="flex items-center gap-2 bg-secondary/30 rounded-xl p-2">
+              <img src={p.roblox_avatar} alt="" className="w-10 h-10 rounded-full" />
+              <div><p className="text-xs text-muted-foreground">Roblox акаунт</p><p className="font-heading text-sm">@{p.roblox_username}</p></div>
+            </div>
+          )}
+        </div>
+
+        <Tabs defaultValue="game">
+          <TabsList className="w-full bg-secondary/50">
+            <TabsTrigger value="game" className="flex-1 font-heading text-xs">Ігри</TabsTrigger>
+            <TabsTrigger value="txs" className="flex-1 font-heading text-xs">Транзакції</TabsTrigger>
+          </TabsList>
+          <TabsContent value="game" className="mt-3 space-y-2">
+            {loadingPlayerDetail ? <div className="flex justify-center py-4"><div className="w-6 h-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" /></div> :
+              playerGameHistory.length === 0 ? <p className="text-center text-muted-foreground text-sm py-4">Немає ігрової історії</p> :
+              playerGameHistory.map(h => (
+                <div key={h.id} className="glass rounded-lg p-3 flex justify-between items-center">
+                  <div><p className="text-xs font-medium capitalize">{h.game_type}</p><p className="text-[10px] text-muted-foreground">{h.details}</p></div>
+                  <p className={`font-heading text-sm ${h.result === "win" ? "text-green-400" : "text-red-400"}`}>{h.result === "win" ? `+€${h.win_amount}` : `-€${h.bet_amount}`}</p>
+                </div>
+              ))
+            }
+          </TabsContent>
+          <TabsContent value="txs" className="mt-3 space-y-2">
+            {loadingPlayerDetail ? <div className="flex justify-center py-4"><div className="w-6 h-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" /></div> :
+              playerTransactions.length === 0 ? <p className="text-center text-muted-foreground text-sm py-4">Немає транзакцій</p> :
+              playerTransactions.map(tx => (
+                <div key={tx.id} className="glass rounded-lg p-3 flex justify-between items-center">
+                  <div>
+                    <p className="text-xs font-medium">{tx.type === "deposit" ? "Поповнення" : "Вивід"} — {tx.status}</p>
+                    <p className="text-[10px] text-muted-foreground">{moment(tx.created_date).format("DD.MM.YY HH:mm")}</p>
+                  </div>
+                  <p className={`font-heading text-sm ${tx.type === "deposit" ? "text-green-400" : "text-accent"}`}>{tx.type === "deposit" ? "+" : "-"}€{tx.amount}</p>
+                </div>
+              ))
+            }
+          </TabsContent>
+        </Tabs>
+      </div>
+    );
+  }
+
+  const pendingTxs = transactions.filter(tx => tx.status === "pending");
+
+  return (
+    <div className="min-h-screen bg-background p-4 max-w-4xl mx-auto">
+      <ActionModal />
+      <div className="flex items-center gap-2 mb-6">
+        <Shield className="w-6 h-6 text-primary" />
+        <h1 className="font-heading text-2xl font-bold neon-glow text-primary">ROBOBET ADMIN</h1>
+      </div>
+
+      <Tabs defaultValue="users">
+        <TabsList className="w-full bg-secondary/50 flex-wrap h-auto gap-1">
+          <TabsTrigger value="users" className="font-heading text-xs flex-1"><Users className="w-3 h-3 mr-1" />Гравці</TabsTrigger>
+          <TabsTrigger value="txs" className="font-heading text-xs flex-1 relative">
+            <Wallet className="w-3 h-3 mr-1" />Фінанси
+            {pendingTxs.length > 0 && <span className="absolute -top-1 -right-1 w-4 h-4 bg-destructive rounded-full text-[10px] flex items-center justify-center">{pendingTxs.length}</span>}
+          </TabsTrigger>
+          <TabsTrigger value="support" className="font-heading text-xs flex-1"><MessageCircle className="w-3 h-3 mr-1" />Підтримка</TabsTrigger>
+          <TabsTrigger value="notifs" className="font-heading text-xs flex-1"><Bell className="w-3 h-3 mr-1" />Сповіщ.</TabsTrigger>
+        </TabsList>
+
+        {/* Users */}
+        <TabsContent value="users" className="mt-4 space-y-3">
+          {players.filter(p => !p.is_deleted).map(p => (
+            <div key={p.id} className={`glass rounded-xl p-4 space-y-3 ${p.is_deleted ? "opacity-60" : ""}`}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-full bg-secondary flex items-center justify-center text-xs font-heading">
+                    {p.nickname?.[0]?.toUpperCase()}
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="font-semibold text-sm">{p.nickname}</p>
+                      {p.is_deleted && <span className="text-[10px] px-1.5 py-0.5 bg-red-900/30 text-red-400 rounded-full">Видалено</span>}
+                      {p.is_banned && !p.is_deleted && <span className="text-[10px] px-1.5 py-0.5 bg-destructive/20 text-destructive rounded-full">Заблоковано</span>}
+                    </div>
+                    <p className="text-xs text-muted-foreground">€{(p.balance || 0).toLocaleString()} | FS: {p.free_spins || 0}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1">
+                  <Button size="sm" variant="ghost" onClick={() => viewPlayer(p)} className="h-7 w-7 p-0"><Eye className="w-3 h-3" /></Button>
+                  {!p.is_deleted && (
+                    <>
+                      <Button size="sm" onClick={() => openBanModal(p)} className={`h-7 text-xs ${p.is_banned ? "bg-green-600 hover:bg-green-700" : "bg-destructive hover:bg-destructive/90"}`}>
+                        {p.is_banned ? <UserCheck className="w-3 h-3" /> : <Ban className="w-3 h-3" />}
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => openDeleteModal(p)} className="h-7 w-7 p-0 border-red-500/40 text-red-400 hover:bg-red-500/10">
+                        <Trash2 className="w-3 h-3" />
+                      </Button>
+                    </>
+                  )}
+                </div>
+              </div>
+              {!p.is_deleted && (
+                <>
+                  <div className="flex gap-2">
+                    <Input type="number" placeholder="±баланс" value={balanceAmounts[p.id] || ""}
+                      onChange={(e) => setBalanceAmounts(prev => ({ ...prev, [p.id]: e.target.value }))}
+                      className="bg-secondary/50 border-border h-8 text-sm" />
+                    <Button size="sm" onClick={() => adjustBalance(p, balanceAmounts[p.id])} className="text-xs bg-green-600 hover:bg-green-700 h-8">+</Button>
+                    <Button size="sm" onClick={() => adjustBalance(p, -Math.abs(parseInt(balanceAmounts[p.id]) || 0))} className="text-xs bg-red-600 hover:bg-red-700 h-8">−</Button>
+                  </div>
+                  <div className="flex gap-2">
+                    <Input type="number" placeholder="Фріспіни" value={bonuses[p.id + "_fs"] || ""}
+                      onChange={(e) => setBonuses(prev => ({ ...prev, [p.id + "_fs"]: e.target.value }))}
+                      className="bg-secondary/50 border-border h-8 text-sm" />
+                    <Button size="sm" onClick={() => giveFreeSpins(p)} className="text-xs bg-purple-600 hover:bg-purple-700 h-8">+FS</Button>
+                  </div>
+                </>
+              )}
+            </div>
+          ))}
+        </TabsContent>
+
+        {/* Transactions */}
+        <TabsContent value="txs" className="mt-4 space-y-3">
+          {transactions.length === 0 ? (
+            <p className="text-center text-muted-foreground text-sm py-8">Немає заявок</p>
+          ) : (
+            transactions.map(tx => (
+              <div key={tx.id} className="glass rounded-xl p-4 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    {tx.type === "deposit" ? <ArrowDownCircle className="w-4 h-4 text-green-400" /> : <ArrowUpCircle className="w-4 h-4 text-accent" />}
+                    <div>
+                      <p className="font-semibold text-sm">{tx.player_nickname} — {tx.type === "deposit" ? "Поповнення" : "Вивід"}</p>
+                      <p className="text-xs text-muted-foreground">{moment(tx.created_date).format("DD.MM.YY HH:mm")} | Roblox: {tx.roblox_username || "—"}</p>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <p className="font-heading text-accent">€{tx.amount.toLocaleString()}</p>
+                    <span className={`text-xs px-2 py-0.5 rounded-full ${tx.status === "approved" ? "bg-green-600/20 text-green-400" : tx.status === "rejected" ? "bg-red-600/20 text-red-400" : "bg-accent/20 text-accent"}`}>
+                      {tx.status === "approved" ? "Підтверджено" : tx.status === "rejected" ? "Відхилено" : "Очікує"}
+                    </span>
+                  </div>
+                </div>
+                {tx.screenshot_url && (
+                  <a href={tx.screenshot_url} target="_blank" rel="noopener noreferrer">
+                    <img src={tx.screenshot_url} alt="скріншот" className="w-full max-h-40 object-cover rounded-lg cursor-pointer hover:opacity-90 transition-opacity" />
+                  </a>
+                )}
+                {tx.status === "pending" && (
+                  <div className="flex gap-2">
+                    <Button size="sm" onClick={() => approveTransaction(tx)} className="flex-1 bg-green-600 hover:bg-green-700 h-8 text-xs font-heading">
+                      <CheckCircle className="w-3 h-3 mr-1" /> Підтвердити
+                    </Button>
+                    <Button size="sm" onClick={() => rejectTransaction(tx)} className="flex-1 bg-red-600 hover:bg-red-700 h-8 text-xs font-heading">
+                      <XCircle className="w-3 h-3 mr-1" /> Відхилити
+                    </Button>
+                  </div>
+                )}
+              </div>
+            ))
+          )}
+        </TabsContent>
+
+        {/* Support */}
+        <TabsContent value="support" className="mt-4 space-y-3">
+          {tickets.length === 0 ? <p className="text-center text-muted-foreground text-sm py-8">Немає тікетів</p> :
+            tickets.map(ticket => (
+              <div key={ticket.id} className="glass rounded-xl p-4 space-y-2">
+                <div className="flex justify-between">
+                  <p className="font-semibold text-sm">{ticket.player_nickname}: {ticket.subject}</p>
+                  <span className={`text-xs px-2 py-0.5 rounded-full ${ticket.status === "open" ? "bg-accent/20 text-accent" : "bg-green-600/20 text-green-400"}`}>{ticket.status}</span>
+                </div>
+                <p className="text-xs text-muted-foreground">{ticket.message}</p>
+                {ticket.admin_reply && <p className="text-xs bg-primary/10 p-2 rounded">Відповідь: {ticket.admin_reply}</p>}
+                {ticket.status === "open" && (
+                  <div className="flex gap-2">
+                    <Input placeholder="Відповідь..." value={replyTexts[ticket.id] || ""}
+                      onChange={(e) => setReplyTexts(prev => ({ ...prev, [ticket.id]: e.target.value }))}
+                      className="bg-secondary/50 border-border h-8 text-sm" />
+                    <Button size="sm" onClick={() => handleReply(ticket)} className="h-8"><Send className="w-3 h-3" /></Button>
+                  </div>
+                )}
+              </div>
+            ))
+          }
+        </TabsContent>
+
+        {/* Notifications */}
+        <TabsContent value="notifs" className="mt-4 space-y-3">
+          <div className="glass rounded-xl p-4 space-y-3">
+            <h3 className="font-heading text-sm font-semibold flex items-center gap-1"><Bell className="w-4 h-4" /> Нове сповіщення</h3>
+            <Input placeholder="Заголовок" value={notifForm.title} onChange={(e) => setNotifForm(p => ({ ...p, title: e.target.value }))} className="bg-secondary/50 h-8 text-sm" />
+            <Textarea placeholder="Повідомлення" value={notifForm.message} onChange={(e) => setNotifForm(p => ({ ...p, message: e.target.value }))} rows={3} className="bg-secondary/50 text-sm" />
+            <Select value={notifForm.target_player_id} onValueChange={(v) => setNotifForm(p => ({ ...p, target_player_id: v === "all" ? "" : v }))}>
+              <SelectTrigger className="bg-secondary/50 h-8 text-sm"><SelectValue placeholder="Кому (за замовчуванням — усім)" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">📢 Усім гравцям</SelectItem>
+                {players.map(p => <SelectItem key={p.id} value={p.id}>{p.nickname}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <Button onClick={sendNotification} disabled={sendingNotif || !notifForm.title.trim() || !notifForm.message.trim()} className="w-full font-heading text-sm bg-primary">
+              {sendingNotif ? <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <><Send className="w-3 h-3 mr-1" /> Відправити</>}
+            </Button>
+          </div>
+        </TabsContent>
+      </Tabs>
+    </div>
+  );
+}
